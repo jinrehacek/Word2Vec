@@ -55,7 +55,7 @@ id_pairs: list[tuple[int, int]] = []
 for i in range(N_TOKENS):
     for j in range(i - CONTEXT, i + CONTEXT + 1):
         if j >= 0 and j < N_TOKENS and i != j:
-            #                   CENTER;    CONTEXT
+            # (CENTER, CONTEXT)
             id_pairs.append((Word2Id[d_tokens[i]], Word2Id[d_tokens[j]]))
 
 
@@ -71,26 +71,22 @@ trainig_loader = DataLoader(
 
 def loss_func(positive_dp: Tensor, negative_dp: Tensor):
     """
-    doesnt implement picking from uniform distributuins
-    you need to suuply the vectors to be picked outsiede of it
+    Input: the dot products for
+     - positive_dp = vector_center * vector_context (dot product); [BATCH_SIZE] scalars
+     - negative_dp = vector_center * vector_context (dot product); [BATCH_SIZE, K_NEGATIVE_SAMPLES] of scalars
     """
-    # positive_dp is [1024]
     pos_sigm = logsigmoid(positive_dp)
-
-    # negative_dp is [1024, 5]. We sum across the 5 negative samples (dim=1)
-    # so we get a single negative penalty for each of the 1024 center words.
+    # sum over the k scalars in negative_dp (after the logsigmoid, as per paper)
     neg_sigm = logsigmoid(-negative_dp).sum(dim=1)
 
-    # Add them together. batch_loss is now an array of 1024 individual losses.
-    batch_loss = pos_sigm + neg_sigm
-
-    # Collapse the 1024 losses into a single average number (a scalar)
-    return -batch_loss.mean()
+    batch_loss = pos_sigm + neg_sigm  # tensor [BATCH_SIZE] of scalars
+    return -batch_loss.mean()  # not sure if legitimate
 
 
 class SkipGram(nn.Module):
     def __init__(self, vocabulary_size, vector_lenght):
         super().__init__()
+        # 2 layers for assymentry
         self.emb1 = nn.Embedding(
             num_embeddings=vocabulary_size, embedding_dim=vector_lenght
         )
@@ -102,11 +98,15 @@ class SkipGram(nn.Module):
         center: Tensor = self.emb1(center_word)
         context: Tensor = self.emb2(context_word)
 
+        # if we are doing negative_pass -> context_word is [BATCH_SIZE, K_NEGATIVE_SAMPLES, VECTOR_LENGHT]
         if context.dim() == 3:
+            # adds new dim as 1st, aka after original 0th dim
             center = center.unsqueeze(1)
+            # center becomes [BATCH_SIZE, 1, VECTOR_LENGHT]
 
-        thing: Tensor = (context * center).sum(dim=-1)
-        return thing
+        # weird, we get the mutliplies just have to add them manually
+        dotproducts: Tensor = (context * center).sum(dim=-1)
+        return dotproducts
 
 
 MODEL = SkipGram(vocabulary_size=VOCAB_SIZE, vector_lenght=VECTOR_LENGHT).to(
@@ -124,29 +124,31 @@ def training_loop(
 ):
     total_loss = 0
     index = 0
-    for center_batch, context_bathc in dataloader:
+    for center_batch, context_batch in dataloader:
         center_batch = center_batch.to(device)
-        context_bathc = context_bathc.to(device)
+        context_batch = context_batch.to(device)
 
-        positive = model(center_batch, context_bathc)
-
-        current_b_size = center_batch.size(0)
+        positive_dp = model(center_batch, context_batch)
 
         # get k random IDs correspodning to some words as one vector
+        # we might not have striclty BATCH_SIZE words left
         neg_words = torch.randint(
-            0, VOCAB_SIZE, (current_b_size, k_negative_samples), device=device
+            0, VOCAB_SIZE, (center_batch.size(0), k_negative_samples), device=device
         )
+        # we get [BATCH_SIZE, K_NEGATIVE_SAMPLES]
+
         negative_dp = model(center_batch, neg_words)
-        loss = loss_func(positive, negative_dp)
+        loss = loss_func(positive_dp, negative_dp)
 
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
         total_loss += loss.item()
 
+        # ------PRINTING---------
         index += 1
-        if index % 1000 == 0:
-            print(f"loss: {loss.item():.4f} at index: {index // 1000} ")
+        if index % 100 == 0:
+            print(f"loss: {loss.item():.4f} at index: {index // 100} ")
 
     return total_loss
 
