@@ -3,7 +3,6 @@ from pathlib import Path
 
 # TORCH imports
 import torch
-from torch.utils.data import DataLoader, TensorDataset
 from torch import Tensor, nn, tensor
 from torch.nn.functional import logsigmoid
 
@@ -58,15 +57,7 @@ for i in range(N_TOKENS):
             # (CENTER, CONTEXT)
             id_pairs.append((Word2Id[d_tokens[i]], Word2Id[d_tokens[j]]))
 
-
-# --------- CREATE DATALOADER ---------------
-big_tensor = tensor(id_pairs, dtype=torch.long)
-trainind_dataset = TensorDataset(big_tensor[:, 0], big_tensor[:, 1])
-trainig_loader = DataLoader(
-    dataset=trainind_dataset,
-    batch_size=BATCH_SIZE,
-    shuffle=True,
-)
+big_tensor = tensor(id_pairs, dtype=torch.long, device=device)
 
 
 def loss_func(positive_dp: Tensor, negative_dp: Tensor):
@@ -116,7 +107,7 @@ OPTIMIZER = torch.optim.SGD(MODEL.parameters(), lr=LEARNING_RATE)
 
 
 def training_loop(
-    dataloader: DataLoader,
+    data_tensor: Tensor,
     model: SkipGram,
     optimizer,
     loss_func,
@@ -124,16 +115,28 @@ def training_loop(
 ):
     total_loss = 0
     index = 0
-    for center_batch, context_batch in dataloader:
-        center_batch = center_batch.to(device)
-        context_batch = context_batch.to(device)
+
+    # data_tensor is [NUM_OF_PAIRS, 2]
+    N_PAIRS = len(data_tensor)
+    permutation = torch.randperm(N_PAIRS, device=device)
+    shuffled: Tensor = torch.index_select(data_tensor, 0, permutation)
+
+    for start_index in range(0, N_PAIRS, BATCH_SIZE):
+        # in case we are near end
+        next_start_index = min(N_PAIRS, start_index + BATCH_SIZE)
+
+        center_batch = shuffled[start_index:next_start_index, 0]
+        context_batch = shuffled[start_index:next_start_index, 1]
 
         positive_dp = model(center_batch, context_batch)
 
         # get k random IDs correspodning to some words as one vector
         # we might not have striclty BATCH_SIZE words left
         neg_words = torch.randint(
-            0, VOCAB_SIZE, (center_batch.size(0), k_negative_samples), device=device
+            0,
+            VOCAB_SIZE,
+            (next_start_index - start_index, k_negative_samples),
+            device=device,
         )
         # we get [BATCH_SIZE, K_NEGATIVE_SAMPLES]
 
@@ -156,7 +159,7 @@ def training_loop(
 for i in range(EPOCHS):
     print(f"-------------EPOCH {i + 1}/{EPOCHS}--------------")
     total_loss = training_loop(
-        dataloader=trainig_loader,
+        data_tensor=big_tensor,
         model=MODEL,
         optimizer=OPTIMIZER,
         loss_func=loss_func,
