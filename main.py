@@ -1,3 +1,5 @@
+# import random
+# from math import sqrt
 import re
 from pathlib import Path
 
@@ -6,14 +8,21 @@ import torch
 from torch import Tensor, nn, tensor
 from torch.nn.functional import logsigmoid
 
-data_path = Path("data.txt")
+
+# ---------------- CONSTANTS -------------------
+data_path = Path("data/final-data.txt")
 CONTEXT = 5  # how many words around of given word we are creating pairs
 EPOCHS = 100  # num of training epochs
-LEARNING_RATE = 1e-2
+LEARNING_RATE = 1
 VECTOR_LENGHT = 100  # dimensions of final vectors we get in the embedding
-K_NEGATIVE_SAMPLES = 5  # how many negative samples we use in negative sampling
+K_NEGATIVE_SAMPLES = 10  # how many negative samples we use in negative sampling
 BATCH_SIZE = 4096
+MIN_COUNT = 5  # how many times i have to see the word so i care
+DELETE_K_TOP_WORDS = 50
+# TRESHOLD = 1e-5  for subsampling (currently unused)
 
+
+# ------------ INPUT & INIT ---------------------------
 device = (
     torch.accelerator.current_accelerator().type  # pyright: ignore
     if torch.accelerator.is_available()
@@ -27,26 +36,69 @@ with open(data_path.absolute(), "r") as file:
 data_raw1 = data_raw0.lower().replace("’", "'")
 
 # tokenize
-d_tokens = re.findall(r"[a-zA-Z']+", data_raw1)
-N_TOKENS = len(d_tokens)
-
-# --------- CREATE SET OF UNIQUE WORDS ---------------
-unique_words = set()
-for token in d_tokens:
-    if token not in unique_words:
-        unique_words.add(token)
-VOCAB_SIZE = len(unique_words)
+tokens_raw: list[str] = re.findall(r"[a-zA-Z']+", data_raw1)
 
 
-# --------- CREATE LOOKUP TABLES ---------------
+# ---------- COUNT WORDS & REMOVE TOO RARE AND TOO ABUNDANT ONES -----------------------------
+# count words
+word_counts: dict[str, int] = dict()
+for token in tokens_raw:
+    if token in word_counts:
+        word_counts[token] += 1
+    else:
+        word_counts[token] = 1
+
+# sort by their presence
+counts_sorted: list[tuple[str, int]] = sorted(
+    word_counts.items(), key=lambda x: x[1], reverse=True
+)
+# ones that we have too much
+unwanted_words: set[str] = set([word for word, _ in counts_sorted[:DELETE_K_TOP_WORDS]])
+
+# clean up rare words
+tokens: list[str] = [
+    token
+    for token in tokens_raw
+    if word_counts[token] >= MIN_COUNT and token not in unwanted_words
+]
+N_TOKENS = len(tokens)
+
+
+# ---- SUBSAMPLING ---------
+# filtered_tokens = []
+# for token in tokens:
+#     freq = word_counts[token] / N_TOKENS
+#     drop_prob = max(0.0, 1.0 - sqrt(TRESHOLD / freq))
+#     if random.random() > drop_prob:
+#         filtered_tokens.append(token)
+# tokens = filtered_tokens
+# N_TOKENS = len(tokens)
+
+
+# --------- CREATE SET OF UNIQUE WORDS & LOOKUP TABLES ---------------
 Word2Id: dict[str, int] = dict()
 Id2Word: dict[int, str] = dict()
 index = 0
-while len(unique_words) > 0:
-    word = unique_words.pop()
-    Word2Id[word] = index
-    Id2Word[index] = word
-    index += 1
+
+unique_words = set()
+for token in tokens:
+    if token not in unique_words:
+        Word2Id[token] = index
+        Id2Word[index] = token
+
+        unique_words.add(token)
+        index += 1
+
+VOCAB_SIZE = len(unique_words)
+
+word_frequency = torch.zeros(VOCAB_SIZE)
+for token in tokens:
+    word_frequency[Word2Id[token]] += 1
+
+# make to power
+token_distribution = word_frequency.pow(0.75)
+# normalise
+token_distribution = token_distribution / token_distribution.sum()
 
 
 # --------- CREATE PAIRS ---------------
@@ -55,7 +107,7 @@ for i in range(N_TOKENS):
     for j in range(i - CONTEXT, i + CONTEXT + 1):
         if j >= 0 and j < N_TOKENS and i != j:
             # (CENTER, CONTEXT)
-            id_pairs.append((Word2Id[d_tokens[i]], Word2Id[d_tokens[j]]))
+            id_pairs.append((Word2Id[tokens[i]], Word2Id[tokens[j]]))
 
 big_tensor = tensor(id_pairs, dtype=torch.long, device=device)
 
@@ -84,6 +136,11 @@ class SkipGram(nn.Module):
         self.emb2 = nn.Embedding(
             num_embeddings=vocabulary_size, embedding_dim=vector_lenght
         )
+
+        # init on sensible value
+        limit = 1.0 / vector_lenght
+        nn.init.uniform_(self.emb1.weight, -limit, limit)
+        nn.init.uniform_(self.emb2.weight, -limit, limit)
 
     def forward(self, center_word: Tensor, context_word: Tensor):
         center: Tensor = self.emb1(center_word)
@@ -130,39 +187,45 @@ def training_loop(
 
         positive_dp = model(center_batch, context_batch)
 
-        # get k random IDs correspodning to some words as one vector
-        # we might not have striclty BATCH_SIZE words left
-        neg_words = torch.randint(
-            0,
-            VOCAB_SIZE,
-            (next_start_index - start_index, k_negative_samples),
-            device=device,
+        current_batch_size = next_start_index - start_index
+        neg_words = (
+            torch.multinomial(
+                token_distribution,
+                num_samples=current_batch_size * k_negative_samples,
+                replacement=True,
+            )
+            .view(current_batch_size, k_negative_samples)
+            .to(device)
         )
+
         # we get [BATCH_SIZE, K_NEGATIVE_SAMPLES]
 
         negative_dp = model(center_batch, neg_words)
         loss = loss_func(positive_dp, negative_dp)
 
+        optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        optimizer.zero_grad()
         total_loss += loss.item()
 
         # ------PRINTING---------
         index += 1
-        if index % 100 == 0:
-            print(f"loss: {loss.item():.4f} at index: {index // 100} ")
+        print_every = 1000
+        if index % print_every == 0:
+            print(f"loss: {loss.item():.3f} at index: {index // print_every} ")
 
-    return total_loss
+    return total_loss, index
 
 
-for i in range(EPOCHS):
-    print(f"-------------EPOCH {i + 1}/{EPOCHS}--------------")
-    total_loss = training_loop(
-        data_tensor=big_tensor,
-        model=MODEL,
-        optimizer=OPTIMIZER,
-        loss_func=loss_func,
-        k_negative_samples=K_NEGATIVE_SAMPLES,
-    )
-    print(f"Average loss: {total_loss:.4f} ")
+if __name__ == "__main__":
+    MODEL.train()
+    for i in range(EPOCHS):
+        print(f"-------------EPOCH {i + 1}/{EPOCHS}--------------")
+        total_loss, index = training_loop(
+            data_tensor=big_tensor,
+            model=MODEL,
+            optimizer=OPTIMIZER,
+            loss_func=loss_func,
+            k_negative_samples=K_NEGATIVE_SAMPLES,
+        )
+        print(f"Average loss: {total_loss / index:.3f} ")
