@@ -61,13 +61,52 @@ AminusBplusC("father", "man", "woman")
 AminusBplusC("brother", "man", "woman")
 AminusBplusC("uncle", "man", "woman")
 AminusBplusC("boy", "man", "woman")
-AminusBplusC("punishment", "crime", "sin")
-AminusBplusC("bad", "good", "love")
-AminusBplusC("death", "life", "joy")
-AminusBplusC("hate", "enemy", "friend")
-AminusBplusC("master", "rich", "poor")
-AminusBplusC("blood", "sword", "poison")
-AminusBplusC("said", "say", "think")
-AminusBplusC("men", "man", "woman")
-AminusBplusC("kings", "king", "queen")
-AminusBplusC("crown", "head", "chair")
+AminusBplusC("husband", "man", "woman")
+# AminusBplusC("punishment", "crime", "sin")
+# AminusBplusC("bad", "good", "love")
+# AminusBplusC("death", "life", "joy")
+# AminusBplusC("hate", "enemy", "friend")
+# AminusBplusC("master", "rich", "poor")
+# AminusBplusC("blood", "sword", "poison")
+# AminusBplusC("said", "say", "think")
+# AminusBplusC("men", "man", "woman")
+# AminusBplusC("kings", "king", "queen")
+# AminusBplusC("crown", "head", "chair")
+
+get_similar("king", n=3)
+get_similar("sword", n=3)
+get_similar("death", n=3)
+get_similar("god", n=3)
+get_similar("money", n=3)
+get_similar("horse", n=3)
+get_similar("soldier", n=3)
+get_similar("daughter", n=3)
+get_similar("wife", n=3)
+get_similar("husband", n=3)
+
+
+from sklearn.decomposition import PCA
+import matplotlib.pyplot as plt
+from main import word_counts
+
+vecs = combined_embeddings.numpy()
+
+N = 120
+top_words = sorted(
+    [w for w in Word2Id], key=lambda w: word_counts.get(w, 0), reverse=True
+)[:N]
+
+top_ids = [Word2Id[w] for w in top_words]
+top_vecs = vecs[top_ids]
+
+pca = PCA(n_components=2)
+coords = pca.fit_transform(top_vecs)
+
+plt.figure(figsize=(14, 10))
+plt.scatter(coords[:, 0], coords[:, 1], s=5)
+for i, w in enumerate(top_words):
+    plt.annotate(w, coords[i], fontsize=6)
+
+plt.title("Word2Vec Embeddings (PCA)")
+plt.savefig("embeddings_pca.png", dpi=150, bbox_inches="tight")
+plt.show()

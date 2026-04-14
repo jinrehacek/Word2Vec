@@ -3,7 +3,6 @@
 import re
 from pathlib import Path
 
-# TORCH imports
 import torch
 from torch import Tensor, nn, tensor
 from torch.nn.functional import logsigmoid
@@ -32,15 +31,14 @@ device = (
 with open(data_path.absolute(), "r") as file:
     data_raw0 = file.read()
 
-# get rid of weird apostrophe
+# get rid of weird/book apostrophe
 data_raw1 = data_raw0.lower().replace("’", "'")
 
-# tokenize
 tokens_raw: list[str] = re.findall(r"[a-zA-Z']+", data_raw1)
 
-
-# ---------- COUNT WORDS & REMOVE TOO RARE AND TOO ABUNDANT ONES -----------------------------
-# count words
+# --------------------------------------------------------------------------------------------
+#                   COUNT WORDS & REMOVE TOO RARE AND TOO ABUNDANT ONES
+# --------------------------------------------------------------------------------------------
 word_counts: dict[str, int] = dict()
 for token in tokens_raw:
     if token in word_counts:
@@ -52,10 +50,9 @@ for token in tokens_raw:
 counts_sorted: list[tuple[str, int]] = sorted(
     word_counts.items(), key=lambda x: x[1], reverse=True
 )
-# ones that we have too much
 unwanted_words: set[str] = set([word for word, _ in counts_sorted[:DELETE_K_TOP_WORDS]])
 
-# clean up rare words
+# clean up tokens
 tokens: list[str] = [
     token
     for token in tokens_raw
@@ -63,6 +60,8 @@ tokens: list[str] = [
 ]
 N_TOKENS = len(tokens)
 
+# NOTE: I did not manage to get it working well with subsampling.
+# That may have been due to bad implementation or hyperparameters.
 
 # ---- SUBSAMPLING ---------
 # filtered_tokens = []
@@ -75,7 +74,9 @@ N_TOKENS = len(tokens)
 # N_TOKENS = len(tokens)
 
 
-# --------- CREATE SET OF UNIQUE WORDS & LOOKUP TABLES ---------------
+# --------------------------------------------------------------------------------------------
+#         CREATE SET OF UNIQUE WORDS & LOOKUP TABLES & DISTRIBUTION & PAIRS TENSOR
+# --------------------------------------------------------------------------------------------
 Word2Id: dict[str, int] = dict()
 Id2Word: dict[int, str] = dict()
 index = 0
@@ -95,10 +96,10 @@ word_frequency = torch.zeros(VOCAB_SIZE)
 for token in tokens:
     word_frequency[Word2Id[token]] += 1
 
-# make to power
-token_distribution = word_frequency.pow(0.75)
+# --------- DISTRIBUTION ---------------
+token_distribution: Tensor = word_frequency.pow(0.75)
 # normalise
-token_distribution = token_distribution / token_distribution.sum()
+token_distribution: Tensor = token_distribution / token_distribution.sum()
 
 
 # --------- CREATE PAIRS ---------------
@@ -123,7 +124,7 @@ def loss_func(positive_dp: Tensor, negative_dp: Tensor):
     neg_sigm = logsigmoid(-negative_dp).sum(dim=1)
 
     batch_loss = pos_sigm + neg_sigm  # tensor [BATCH_SIZE] of scalars
-    return -batch_loss.mean()  # not sure if legitimate
+    return -batch_loss.mean()
 
 
 class SkipGram(nn.Module):
@@ -137,10 +138,10 @@ class SkipGram(nn.Module):
             num_embeddings=vocabulary_size, embedding_dim=vector_lenght
         )
 
-        # init on sensible value
-        limit = 1.0 / vector_lenght
-        nn.init.uniform_(self.emb1.weight, -limit, limit)
-        nn.init.uniform_(self.emb2.weight, -limit, limit)
+        # init on sensible (small) value, so it doesnt get crushed by sigmoid near extremes
+        init_value = 1.0 / vector_lenght
+        nn.init.uniform_(self.emb1.weight, -init_value, init_value)
+        nn.init.uniform_(self.emb2.weight, -init_value, init_value)
 
     def forward(self, center_word: Tensor, context_word: Tensor):
         center: Tensor = self.emb1(center_word)
@@ -152,7 +153,6 @@ class SkipGram(nn.Module):
             center = center.unsqueeze(1)
             # center becomes [BATCH_SIZE, 1, VECTOR_LENGHT]
 
-        # weird, we get the mutliplies just have to add them manually
         dotproducts: Tensor = (context * center).sum(dim=-1)
         return dotproducts
 
@@ -168,7 +168,6 @@ def training_loop(
     model: SkipGram,
     optimizer,
     loss_func,
-    k_negative_samples: int = 5,
 ):
     total_loss = 0
     index = 0
@@ -178,29 +177,27 @@ def training_loop(
     permutation = torch.randperm(N_PAIRS, device=device)
     shuffled: Tensor = torch.index_select(data_tensor, 0, permutation)
 
-    for start_index in range(0, N_PAIRS, BATCH_SIZE):
+    for start in range(0, N_PAIRS, BATCH_SIZE):
         # in case we are near end
-        next_start_index = min(N_PAIRS, start_index + BATCH_SIZE)
+        next_start = min(N_PAIRS, start + BATCH_SIZE)
+        current_batch_size = next_start - start
 
-        center_batch = shuffled[start_index:next_start_index, 0]
-        context_batch = shuffled[start_index:next_start_index, 1]
+        center_batch = shuffled[start:next_start, 0]
+        context_batch = shuffled[start:next_start, 1]
 
         positive_dp = model(center_batch, context_batch)
 
-        current_batch_size = next_start_index - start_index
-        neg_words = (
+        negative_words = (
             torch.multinomial(
                 token_distribution,
-                num_samples=current_batch_size * k_negative_samples,
+                num_samples=current_batch_size * K_NEGATIVE_SAMPLES,
                 replacement=True,
             )
-            .view(current_batch_size, k_negative_samples)
+            .view(current_batch_size, K_NEGATIVE_SAMPLES)
             .to(device)
-        )
+        )  # => [BATCH_SIZE, K_NEGATIVE_SAMPLES]
 
-        # we get [BATCH_SIZE, K_NEGATIVE_SAMPLES]
-
-        negative_dp = model(center_batch, neg_words)
+        negative_dp = model(center_batch, negative_words)
         loss = loss_func(positive_dp, negative_dp)
 
         optimizer.zero_grad()
@@ -226,6 +223,5 @@ if __name__ == "__main__":
             model=MODEL,
             optimizer=OPTIMIZER,
             loss_func=loss_func,
-            k_negative_samples=K_NEGATIVE_SAMPLES,
         )
         print(f"Average loss: {total_loss / index:.3f} ")
