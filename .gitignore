@@ -5,3 +5,4 @@ other/
 data/
 
 __pycache__
+Word2Vec.ipynb
